@@ -4876,24 +4876,37 @@ def handle_clipboard_update(handle_proc):
 def get_system_volume():
     #调到音量5时,对应volume为0.05
     from pycaw.pycaw  import AudioUtilities, IAudioEndpointVolume  
+    import pythoncom
     # 初始化音频会话  
+    pythoncom.CoInitialize()
     sessions = AudioUtilities.GetSpeakers()  
     interface = sessions.Activate(IAudioEndpointVolume._iid_, 0, None)  
     volume = interface.QueryInterface(IAudioEndpointVolume)  
-     
     # 获取/设置音量  
     current_volume = volume.GetMasterVolumeLevelScalar()  
     is_muted = volume.GetMute()  
+    try:
+        pythoncom.CoUninitialize()
+    except:
+        print("pythoncom.CoUninitialize()失败")
+        pass
     return current_volume,is_muted
 
 def unmute():
     # 初始化音频会话
     from pycaw.pycaw  import AudioUtilities, IAudioEndpointVolume  
+    import pythoncom
+    pythoncom.CoInitialize()
     sessions = AudioUtilities.GetSpeakers()
     interface = sessions.Activate(IAudioEndpointVolume._iid_, 0, None)
     volume = interface.QueryInterface(IAudioEndpointVolume)
     # 取消静音
     volume.SetMute(0, None)
+    try:
+        pythoncom.CoUninitialize()
+    except:
+        print("pythoncom.CoUninitialize()失败")
+        pass
 
 def set_system_volume(volume):
     #调到音量5时,对应volume为0.05
@@ -4901,6 +4914,11 @@ def set_system_volume(volume):
     from comtypes import CLSCTX_ALL
     from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
     import pythoncom
+
+    volume, is_muted = get_system_volume()
+    if is_muted and volume>0: 
+        unmute()
+
     pythoncom.CoInitialize()
     devices = AudioUtilities.GetSpeakers()
     interface = devices.Activate(
