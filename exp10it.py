@@ -4893,43 +4893,106 @@ def get_system_volume():
     return current_volume,is_muted
 
 def unmute():
-    # 初始化音频会话
-    from pycaw.pycaw  import AudioUtilities, IAudioEndpointVolume  
+    """
+    取消Windows系统静音状态
+    
+    异常:
+        RuntimeError: 操作失败时抛出
+    """
+    from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
     import pythoncom
-    pythoncom.CoInitialize()
-    sessions = AudioUtilities.GetSpeakers()
-    interface = sessions.Activate(IAudioEndpointVolume._iid_, 0, None)
-    volume = interface.QueryInterface(IAudioEndpointVolume)
-    # 取消静音
-    volume.SetMute(0, None)
+    import comtypes
+    
+    # 初始化COM环境
     try:
-        pythoncom.CoUninitialize()
-    except:
-        print("pythoncom.CoUninitialize()失败")
-        pass
+        pythoncom.CoInitialize()
+    except comtypes.COMError as e:
+        # 如果COM已经初始化，忽略特定错误
+        if e.hresult != -2147221008:  # RPC_E_CHANGED_MODE
+            raise RuntimeError(f"COM初始化失败: {str(e)}") from e
+    
+    try:
+        # 获取默认音频设备
+        devices = AudioUtilities.GetSpeakers()
+        
+        # 激活音量控制接口
+        interface = devices.Activate(
+            IAudioEndpointVolume._iid_, 
+            pythoncom.CLSCTX_ALL, 
+            None
+        )
+        
+        # 获取音量控制对象
+        volume = interface.QueryInterface(IAudioEndpointVolume)
+        
+        # 取消静音
+        volume.SetMute(False, None)
+        
+    except Exception as e:
+        raise RuntimeError(f"取消静音失败: {str(e)}") from e
+    
+    finally:
+        # 确保清理COM资源
+        try:
+            pythoncom.CoUninitialize()
+        except comtypes.COMError as e:
+            # 处理反初始化错误
+            if e.hresult != -2147417846:  # 0x80010106 (RPC_E_NOT_REGISTERED)
+                print(f"COM反初始化失败: {str(e)}")
 
 def set_system_volume(volume):
     #调到音量5时,对应volume为0.05
-    from ctypes import cast, POINTER
+    """
+    设置Windows系统音量 (使用pycaw库)
+    
+    参数:
+        volume (float): 音量级别，范围0.0（静音）到1.0（最大音量）
+    
+    异常:
+        ValueError: 音量超出范围
+        RuntimeError: 音量设置失败
+    """
+    # 验证音量范围
+    if not (0.0 <= volume <= 1.0):
+        raise ValueError("音量必须在0.0到1.0之间")
+    
+    from comtypes import CoInitialize, CoUninitialize
     from comtypes import CLSCTX_ALL
+    from ctypes import cast, POINTER
     from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
-    import pythoncom
-
-    volume, is_muted = get_system_volume()
-    if is_muted and volume>0: 
-        unmute()
-
-    pythoncom.CoInitialize()
-    devices = AudioUtilities.GetSpeakers()
-    interface = devices.Activate(
-        IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
-    volume_object = cast(interface, POINTER(IAudioEndpointVolume))
-    volume_object.SetMasterVolumeLevelScalar(volume, None)
+    
     try:
-        pythoncom.CoUninitialize()
-    except:
-        print("pythoncom.CoUninitialize()失败")
-        pass
+        # 初始化COM库（线程安全方式）
+        CoInitialize()
+        
+        # 获取默认音频设备
+        devices = AudioUtilities.GetSpeakers()
+        interface = devices.Activate(
+            IAudioEndpointVolume._iid_, 
+            CLSCTX_ALL, 
+            None
+        )
+        
+        # 获取音量控制接口
+        volume_control = cast(interface, POINTER(IAudioEndpointVolume))
+        
+        # 设置音量
+        volume_control.SetMasterVolumeLevelScalar(volume, None)
+        
+        # 如果设置音量>0时系统静音，则自动取消静音
+        if volume > 0 and volume_control.GetMute():
+            volume_control.SetMute(False, None)
+            
+    except Exception as e:
+        raise RuntimeError(f"音量设置失败: {str(e)}")
+    finally:
+        # 确保清理COM资源
+        try:
+            CoUninitialize()
+        except:
+            # COM可能未初始化或已卸载
+            pass
+
 
 def get_system_volume_at_macOS():
     #获取系统音量大小,如果是5则返回0.05
