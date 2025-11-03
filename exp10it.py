@@ -21,6 +21,9 @@ import subprocess
 import base64
 import binascii
 from decimal import Decimal, ROUND_HALF_UP
+from requests.adapters import HTTPAdapter
+from urllib3.util.ssl_ import create_urllib3_context
+import ssl
 
 requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 requests.packages.urllib3.disable_warnings(InsecurePlatformWarning)
@@ -242,7 +245,6 @@ def module_exist(module_name):
 
 
 if sys.version_info >= (2, 7, 9):
-    import ssl
     ssl._create_default_https_context = ssl._create_unverified_context
 
 if sys.version_info <= (3, 0, 0):
@@ -2608,6 +2610,13 @@ def check_start_time(want_time):
     print("到点,现在时刻:%s" % a)
 
 
+class TLSAdapter(HTTPAdapter):
+    def init_poolmanager(self, *args, **kwargs):
+        ctx = create_urllib3_context()
+        ctx.set_ciphers('DEFAULT@SECLEVEL=1')
+        kwargs['ssl_context'] = ctx
+        return super().init_poolmanager(*args, **kwargs)
+
 def send_http_packet(string, http_or_https, proxies={},encoding="chardet",allow_redirects=True):
     #requests会自动处理302跳转,也即默认情况下302的响应内容无法获取,但有时候302的响应内容中会包含重要的响应头(如csrf-token),遇到这种情况要设置allow_redirects=False
     # 发http请求包封装函数,string可以是burpsuite等截包工具中拦截到的包
@@ -2628,19 +2637,37 @@ def send_http_packet(string, http_or_https, proxies={},encoding="chardet",allow_
             url = http_or_https + "://" + re.search(r"Host: (\S+)", string, re.I).group(
                 1) + re.search(r" (\S+)", uri_line, re.I).group(1)
             if string[:3] == "GET":
-                if proxies == {}:
-                    res = requests.get(url, headers=header_dict,timeout=30,verify=False,allow_redirects=allow_redirects)
-                else:
-                    res = requests.get(url, headers=header_dict, proxies=proxies,timeout=30,verify=False,allow_redirects=allow_redirects)
+                if http_or_https=="http":
+                    if proxies == {}:
+                        res = requests.get(url, headers=header_dict,timeout=30,verify=False,allow_redirects=allow_redirects)
+                    else:
+                        res = requests.get(url, headers=header_dict, proxies=proxies,timeout=30,verify=False,allow_redirects=allow_redirects)
+                elif http_or_https=="https":
+                    #有些服务器可能加了waf会验证TLS/SSL环节,requests的默认行为会被ban
+                    session = requests.Session()
+                    session.mount('https://', TLSAdapter())
+                    if proxies == {}:
+                        res = session.get(url, headers=header_dict,timeout=30,verify=False,allow_redirects=allow_redirects)
+                    else:
+                        res = session.get(url, headers=header_dict, proxies=proxies,timeout=30,verify=False,allow_redirects=allow_redirects)
+                    
             elif string[:4] == "POST":
                 post_string = re.search(r"((\r\n\r\n)|(\n\n))(.*)", string).group(4)
                 post_string_bytes = post_string.encode("utf8")
-                if proxies == {}:
-                    res = requests.post(url, headers=header_dict,
-                                        data=post_string_bytes,timeout=30,verify=False,allow_redirects=allow_redirects)
-                else:
-                    res = requests.post(url, headers=header_dict,
-                                        data=post_string_bytes, proxies=proxies,timeout=30,verify=False,allow_redirects=allow_redirects)
+                if http_or_https=="http":
+                    if proxies == {}:
+                        res = requests.post(url, headers=header_dict,data=post_string_bytes,timeout=30,verify=False,allow_redirects=allow_redirects)
+                    else:
+                        res = requests.post(url, headers=header_dict,data=post_string_bytes, proxies=proxies,timeout=30,verify=False,allow_redirects=allow_redirects)
+                elif http_or_https=="https":
+                    #有些服务器可能加了waf会验证TLS/SSL环节,requests的默认行为会被ban
+                    session = requests.Session()
+                    session.mount('https://', TLSAdapter())
+                    if proxies == {}:
+                        res = session.post(url, headers=header_dict,data=post_string_bytes,timeout=30,verify=False,allow_redirects=allow_redirects)
+                    else:
+                        res = session.post(url, headers=header_dict,data=post_string_bytes, proxies=proxies,timeout=30,verify=False,allow_redirects=allow_redirects)
+
             code = res.status_code
             headers = res.headers
             content = res.content
@@ -2658,6 +2685,7 @@ def send_http_packet(string, http_or_https, proxies={},encoding="chardet",allow_
             return_value['headers'] = headers
             return_value['html'] = content
             return return_value
+
         except:
             retry_count+=1
             if retry_count>=5:
@@ -2667,7 +2695,92 @@ def send_http_packet(string, http_or_https, proxies={},encoding="chardet",allow_
             time.sleep(3)
             continue
 
-async def async_send_http_packet(string, http_or_https, proxies={},encoding="chardet"):
+async def async_send_http_packet(string, http_or_https, proxies={}, encoding="chardet", allow_redirects=True):
+    # 发http请求包封装函数,string可以是burpsuite等截包工具中拦截到的包
+    # string要求是burpsuite中抓包抓到的字符串,也即已经经过urlencode
+    # proxy_url为代理地址,eg."http://127.0.0.1:8080"
+    # encoding用于解码服务器返回的内容,默认使用chardet检测出服务器的编码是什么,但有时候chardet检测的不对,这种情况需要手动设置encoding的值
+    # 返回的内容为一个字典,{'code':xxx,'headers':xxx,'html':'xxx'},其中code为int类型,headers是dict类型,html为str类型
+    
+    import asyncio
+    # 创建自定义 SSL 上下文
+    ssl_context = ssl.create_default_context()
+    # 设置兼容的密码套件（类似 requests 中的 TLSAdapter）
+    # 这里使用与之前类似的密码套件配置
+    ssl_context.set_ciphers('DEFAULT@SECLEVEL=1')
+    # 创建连接器，使用自定义 SSL 上下文
+    connector = aiohttp.TCPConnector(ssl=ssl_context)
+    
+    retry_count = 0
+    while True:
+        try:
+            return_value = {'code': 0, 'headers': {}, 'html': ''}
+            string = re.sub(r"^\s", "", string)
+            uri_line = re.search(r"(^.+)", string).group(1)
+            header_dict = {}
+            header_list = re.findall(r"([^:\s]+): ([^\r\n]+)((\n)|(\r\n))", string)
+            for each in header_list:
+                header_dict[each[0]] = each[1]
+            
+            url = http_or_https + "://" + re.search(r"Host: (\S+)", string, re.I).group(1) + re.search(r" (\S+)", uri_line, re.I).group(1)
+            
+            # 使用自定义连接器
+            async with aiohttp.ClientSession(connector=connector) as session:
+                if string[:3] == "GET":
+                    if proxies == {}:
+                        async with session.get(url, headers=header_dict, timeout=30, ssl=False, allow_redirects=allow_redirects) as res:
+                            code = res.status
+                            headers = dict(res.headers)
+                            content = await res.read()
+                    else:
+                        async with session.get(url, headers=header_dict, proxy=proxies, timeout=30, ssl=False, allow_redirects=allow_redirects) as res:
+                            code = res.status
+                            headers = dict(res.headers)
+                            content = await res.read()
+                elif string[:4] == "POST":
+                    post_string = re.search(r"((\r\n\r\n)|(\n\n))(.*)", string).group(4)
+                    post_string_bytes = post_string.encode("utf8")
+                    if proxies == {}:
+                        async with session.post(url, headers=header_dict, data=post_string_bytes, timeout=30, ssl=False, allow_redirects=allow_redirects) as res:
+                            code = res.status
+                            headers = dict(res.headers)
+                            content = await res.read()
+                    else:
+                        async with session.post(url, headers=header_dict, data=post_string_bytes, proxy=proxies, timeout=30, ssl=False, allow_redirects=allow_redirects) as res:
+                            code = res.status
+                            headers = dict(res.headers)
+                            content = await res.read()
+            
+            if encoding == 'chardet':
+                import chardet
+                bytes_encoding = chardet.detect(content)['encoding']
+                if bytes_encoding is None:
+                    bytes_encoding = "utf8"
+            else:
+                bytes_encoding = encoding
+            
+            content = content.decode(encoding=bytes_encoding, errors="ignore")
+            return_value['code'] = code
+            return_value['headers'] = headers
+            return_value['html'] = content
+            return return_value
+            
+        except Exception as e:
+            retry_count += 1
+            if retry_count >= 5:
+                print("异常,访问了5次还是没有结果")
+                print(f"错误信息: {e}")
+                print("当前请求包是:\n" + string)
+                return None
+            await asyncio.sleep(3)
+            continue
+        finally:
+            # 确保连接器被正确关闭
+            if 'connector' in locals():
+                await connector.close()
+
+
+async def async_send_http_packet_old(string, http_or_https, proxies={},encoding="chardet"):
     # 发http请求包封装函数,string可以是burpsuite等截包工具中拦截到的包
     # string要求是burpsuite中抓包抓到的字符串,也即已经经过urlencode
     # proxy_url为代理地址,eg."http://127.0.0.1:8080"
